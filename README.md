@@ -4,7 +4,7 @@
 | [**Paper**](https://arxiv.org/pdf/2210.16743.pdf)
 
 
-P||roduction First and Production Ready End-to-End Keyword Spotting Toolkit.
+Production First and Production Ready End-to-End Keyword Spotting Toolkit.
 
 The goal of this toolkit it to...
 
