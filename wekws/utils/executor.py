@@ -34,17 +34,19 @@ class Executor:
         min_duration = args.get('min_duration', 0)
 
         for batch_idx, batch in enumerate(data_loader):
-            key, feats, target, feats_lengths = batch
+            key, feats, target, ctc_target, feats_lengths, ctc_label_lengths = batch
             feats = feats.to(device)
             target = target.to(device)
+            ctc_target = ctc_target.to(device)
             feats_lengths = feats_lengths.to(device)
+            ctc_label_lengths = ctc_label_lengths.to(device)
             num_utts = feats_lengths.size(0)
             if num_utts == 0:
                 continue
-            logits, _ = model(feats)
+            logits, ctc_logits, _ = model(feats)
             loss_type = args.get('criterion', 'max_pooling')
-            loss, acc = criterion(loss_type, logits, target, feats_lengths,
-                                  min_duration)
+            loss, ctc_loss, acc = criterion(loss_type, logits, target, feats_lengths,
+                                            min_duration, ctc_logits, ctc_target, ctc_label_lengths)
             optimizer.zero_grad()
             loss.backward()
             grad_norm = clip_grad_norm_(model.parameters(), clip)
@@ -52,8 +54,8 @@ class Executor:
                 optimizer.step()
             if batch_idx % log_interval == 0:
                 logging.debug(
-                    'TRAIN Batch {}/{} loss {:.8f} acc {:.8f}'.format(
-                        epoch, batch_idx, loss.item(), acc))
+                    'TRAIN Batch {}/{} loss {:.8f} ctc_loss {:.8f} acc {:.8f}'.format(
+                        epoch, batch_idx, loss.item(), ctc_loss.item(), acc))
 
     def cv(self, model, data_loader, device, args):
         ''' Cross validation on
@@ -64,29 +66,35 @@ class Executor:
         # in order to avoid division by 0
         num_seen_utts = 1
         total_loss = 0.0
+        total_ctc_loss = []
         total_acc = 0.0
         with torch.no_grad():
             for batch_idx, batch in enumerate(data_loader):
-                key, feats, target, feats_lengths = batch
+                key, feats, target, ctc_target, feats_lengths, ctc_label_lengths = batch
                 feats = feats.to(device)
                 target = target.to(device)
+                ctc_target = ctc_target.to(device)
                 feats_lengths = feats_lengths.to(device)
+                ctc_label_lengths = ctc_label_lengths.to(device)
                 num_utts = feats_lengths.size(0)
                 if num_utts == 0:
                     continue
-                logits, _ = model(feats)
-                loss, acc = criterion(args.get('criterion', 'max_pooling'),
-                                      logits, target, feats_lengths)
+                logits, ctc_logits, _ = model(feats)
+                loss, ctc_loss, acc = criterion(args.get('criterion', 'max_pooling'),
+                                                logits, target, feats_lengths, 0,
+                                                ctc_logits, ctc_target, ctc_label_lengths)
+
                 if torch.isfinite(loss):
+                    total_ctc_loss.append(ctc_loss.item())
                     num_seen_utts += num_utts
                     total_loss += loss.item() * num_utts
                     total_acc += acc * num_utts
                 if batch_idx % log_interval == 0:
                     logging.debug(
-                        'CV Batch {}/{} loss {:.8f} acc {:.8f} history loss {:.8f}'
-                        .format(epoch, batch_idx, loss.item(), acc,
+                        'CV Batch {}/{} loss {:.8f} ctc_loss {:.8f} acc {:.8f} history loss {:.8f}'
+                        .format(epoch, batch_idx, loss.item(), ctc_loss.item(), acc,
                                 total_loss / num_seen_utts))
-        return total_loss / num_seen_utts, total_acc / num_seen_utts
+        return total_loss / num_seen_utts, sum(total_ctc_loss) / len(total_ctc_loss), total_acc / num_seen_utts
 
     def test(self, model, data_loader, device, args):
         return self.cv(model, data_loader, device, args)

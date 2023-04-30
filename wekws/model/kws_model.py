@@ -17,7 +17,7 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
-
+import torch.nn.functional as F
 from wekws.model.cmvn import GlobalCMVN
 from wekws.model.classifier import (GlobalClassifier, LastClassifier,
                                     LinearClassifier)
@@ -46,8 +46,9 @@ class KWSModel(nn.Module):
         global_cmvn: Optional[nn.Module],
         preprocessing: Optional[nn.Module],
         backbone: nn.Module,
-        classifier: nn.Module,
-        activation: nn.Module,
+        classifier: Optional[nn.Module] = None,
+        activation: Optional[nn.Module] = None,
+        ctc_lo: Optional[nn.Module] = None
     ):
         super().__init__()
         self.idim = idim
@@ -58,19 +59,28 @@ class KWSModel(nn.Module):
         self.backbone = backbone
         self.classifier = classifier
         self.activation = activation
+        self.ctc_lo = ctc_lo
 
     def forward(
         self,
         x: torch.Tensor,
         in_cache: torch.Tensor = torch.zeros(0, 0, 0, dtype=torch.float)
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], torch.Tensor]:
         if self.global_cmvn is not None:
             x = self.global_cmvn(x)
         x = self.preprocessing(x)
         x, out_cache = self.backbone(x, in_cache)
-        x = self.classifier(x)
-        x = self.activation(x)
-        return x, out_cache
+        if self.ctc_lo is not None:
+            x_ctc = F.log_softmax(self.ctc_lo(x), dim=2)
+        else:
+            x_ctc = None
+        # TODO: 下面classifier对应改一下
+        if self.classifier is not None:
+            x = self.classifier(x)
+            x = self.activation(x)
+        else:
+            x = None
+        return x, x_ctc, out_cache
 
     def fuse_modules(self):
         self.preprocessing.fuse_modules()
@@ -92,7 +102,8 @@ def init_model(configs):
     input_dim = configs['input_dim']
     output_dim = configs['output_dim']
     hidden_dim = configs['hidden_dim']
-
+    vocab_size = configs['vocab_size']
+    mode = configs['mode']
     prep_type = configs['preprocessing']['type']
     if prep_type == 'linear':
         preprocessing = LinearSubsampling1(input_dim, hidden_dim)
@@ -138,30 +149,37 @@ def init_model(configs):
     else:
         print('Unknown body type {}'.format(backbone_type))
         sys.exit(1)
-    if 'classifier' in configs:
-        # For speech command dataset, we use 2 FC layer as classifier,
-        # we add dropout after first FC layer to prevent overfitting
-        classifier_type = configs['classifier']['type']
-        dropout = configs['classifier']['dropout']
+    if mode == 'keyword' or mode == 'joint':
+        if 'classifier' in configs:
+            # For speech command dataset, we use 2 FC layer as classifier,
+            # we add dropout after first FC layer to prevent overfitting
+            classifier_type = configs['classifier']['type']
+            dropout = configs['classifier']['dropout']
 
-        classifier_base = nn.Sequential(nn.Linear(hidden_dim, 64), nn.ReLU(),
-                                        nn.Dropout(dropout),
-                                        nn.Linear(64, output_dim))
-        if classifier_type == 'global':
-            # global means we add a global average pooling before classifier
-            classifier = GlobalClassifier(classifier_base)
-        elif classifier_type == 'last':
-            # last means we use last frame to do backpropagation, so the model
-            # can be infered streamingly
-            classifier = LastClassifier(classifier_base)
+            classifier_base = nn.Sequential(nn.Linear(hidden_dim, 64), nn.ReLU(),
+                                            nn.Dropout(dropout),
+                                            nn.Linear(64, output_dim))
+            if classifier_type == 'global':
+                # global means we add a global average pooling before classifier
+                classifier = GlobalClassifier(classifier_base)
+            elif classifier_type == 'last':
+                # last means we use last frame to do backpropagation, so the model
+                # can be infered streamingly
+                classifier = LastClassifier(classifier_base)
+            else:
+                print('Unknown classifier type {}'.format(classifier_type))
+                sys.exit(1)
+            activation = nn.Identity()
         else:
-            print('Unknown classifier type {}'.format(classifier_type))
-            sys.exit(1)
-        activation = nn.Identity()
+            classifier = LinearClassifier(hidden_dim, output_dim)
+            activation = nn.Sigmoid()
     else:
-        classifier = LinearClassifier(hidden_dim, output_dim)
-        activation = nn.Sigmoid()
-
+        classifier = None
+        activation = None
+    if vocab_size > 0:
+        ctc_lo = LinearClassifier(hidden_dim, vocab_size)   
+    else:
+        ctc_lo = None
     kws_model = KWSModel(input_dim, output_dim, hidden_dim, global_cmvn,
-                         preprocessing, backbone, classifier, activation)
+                         preprocessing, backbone, classifier, activation, ctc_lo)
     return kws_model

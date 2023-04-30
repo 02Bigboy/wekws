@@ -41,19 +41,41 @@ def parse_raw(data):
         obj = json.loads(json_line)
         assert 'key' in obj
         assert 'wav' in obj
-        assert 'txt' in obj
+        assert 'label' in obj
         key = obj['key']
         wav_file = obj['wav']
-        txt = obj['txt']
+        label = obj['label']
+        txt = obj.get('txt', None)
+        if txt == "-1" :
+            txt = None        # 为了让key里面的负样本不参与ctc训练
+        # 为了让关键词不参与ctc训练
+        if label != -1:
+            txt = None
         try:
             waveform, sample_rate = torchaudio.load(wav_file)
             example = dict(key=key,
-                           label=txt,
+                           label=label,
+                           txt=txt,
                            wav=waveform,
                            sample_rate=sample_rate)
             yield example
         except Exception as ex:
             logging.warning('Failed to read {}'.format(wav_file))
+
+
+def token2label(data, symbol_table):
+    # print(symbol_table)
+    for sample in data:
+        if sample['txt']:
+            tokens = list(sample['txt'].strip())   # NOTE：汉字中间没有空格  
+            label = []
+            for ch in tokens:
+                if ch in symbol_table:
+                    label.append(symbol_table[ch])
+                elif '<unk>' in symbol_table:
+                    label.append(symbol_table['<unk>'])
+            sample['ctc_label'] = label
+        yield sample
 
 
 def filter(data, max_length=10240, min_length=10):
@@ -193,6 +215,7 @@ def compute_fbank(data,
         waveform = sample['wav']
         waveform = waveform * (1 << 15)
         # Only keep key, feat, label
+        # dither = 0 if random.random() > 0.5 else 1
         mat = kaldi.fbank(waveform,
                           num_mel_bins=num_mel_bins,
                           frame_length=frame_length,
@@ -200,7 +223,8 @@ def compute_fbank(data,
                           dither=dither,
                           energy_floor=0.0,
                           sample_frequency=sample_rate)
-        yield dict(key=sample['key'], label=sample['label'], feat=mat)
+        yield dict(key=sample['key'], label=sample['label'], feat=mat,
+                   ctc_label=sample.get('ctc_label', [-1]))
 
 
 def spec_aug(data, num_t_mask=2, num_f_mask=2, max_t=50, max_f=10):
@@ -304,10 +328,19 @@ def padding(data):
         sorted_keys = [sample[i]['key'] for i in order]
         sorted_labels = torch.tensor([sample[i]['label'] for i in order],
                                      dtype=torch.int64)
+        sorted_ctc_labels = [
+            torch.tensor(sample[i]['ctc_label'], dtype=torch.int64) for i in order
+        ]
+        ctc_label_lengths = torch.tensor([x.size(0) for x in sorted_ctc_labels],
+                                         dtype=torch.int32)
         padded_feats = pad_sequence(sorted_feats,
                                     batch_first=True,
                                     padding_value=0)
-        yield (sorted_keys, padded_feats, sorted_labels, feats_lengths)
+        padded_ctc_labels = pad_sequence(sorted_ctc_labels,
+                                         batch_first=True,
+                                         padding_value=-1)
+        yield (sorted_keys, padded_feats, sorted_labels, padded_ctc_labels,
+               feats_lengths, ctc_label_lengths)
 
 
 def add_reverb(data, reverb_source, aug_prob):
@@ -336,7 +369,7 @@ def add_noise(data, noise_source, aug_prob):
         if aug_prob > random.random():
             audio = sample['wav'].numpy()[0]
             audio_len = audio.shape[0]
-            audio_db = 10 * np.log10(np.mean(audio**2) + 1e-4)
+            audio_db = 10 * np.log10(np.mean(audio**2) + 1e-4)    # 语音的能量
             key, noise_data = noise_source.random_one()
             if key.startswith('noise'):
                 snr_range = [0, 15]

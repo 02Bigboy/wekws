@@ -30,6 +30,7 @@ from wekws.dataset.dataset import Dataset
 from wekws.utils.checkpoint import load_checkpoint, save_checkpoint
 from wekws.model.kws_model import init_model
 from wekws.utils.executor import Executor
+from wekws.utils.file_utils import read_symbol_table
 from wekws.utils.train_utils import count_parameters, set_mannul_seed
 
 
@@ -83,6 +84,9 @@ def get_args():
     parser.add_argument('--noise_lmdb',
                         default=None,
                         help='noise lmdb file')
+    parser.add_argument('--symbol_table',
+                        default=None,
+                        help='model unit symbol table for training')
 
     args = parser.parse_args()
     return args
@@ -111,12 +115,19 @@ def main():
     cv_conf['speed_perturb'] = False
     cv_conf['spec_aug'] = False
     cv_conf['shuffle'] = False
+    if args.symbol_table is not None:
+        symbol_table = read_symbol_table(args.symbol_table)
+        vocab_size = len(symbol_table)
+    else:
+        symbol_table = None
+        vocab_size = 0
 
     train_dataset = Dataset(args.train_data,
+                            symbol_table,
                             train_conf,
                             reverb_lmdb=args.reverb_lmdb,
                             noise_lmdb=args.noise_lmdb)
-    cv_dataset = Dataset(args.cv_data, cv_conf)
+    cv_dataset = Dataset(args.cv_data, symbol_table, cv_conf)
 
     train_data_loader = DataLoader(train_dataset,
                                    batch_size=None,
@@ -136,6 +147,7 @@ def main():
     # Write model_dir/config.yaml for inference and export
     configs['model']['input_dim'] = input_dim
     configs['model']['output_dim'] = output_dim
+    configs['model']['vocab_size'] = vocab_size
     if args.cmvn_file is not None:
         configs['model']['cmvn'] = {}
         configs['model']['cmvn']['norm_var'] = args.norm_var

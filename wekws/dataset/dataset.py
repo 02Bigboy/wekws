@@ -113,7 +113,9 @@ class DataList(IterableDataset):
             yield data
 
 
-def Dataset(data_list_file, conf,
+def Dataset(data_list_file,
+            symbol_table,
+            conf,
             partition=True,
             reverb_lmdb=None,
             noise_lmdb=None):
@@ -133,6 +135,8 @@ def Dataset(data_list_file, conf,
     shuffle = conf.get('shuffle', True)
     dataset = DataList(lists, shuffle=shuffle, partition=partition)
     dataset = Processor(dataset, processor.parse_raw)
+    if symbol_table is not None:
+        dataset = Processor(dataset, processor.token2label, symbol_table)
     filter_conf = conf.get('filter_conf', {})
     dataset = Processor(dataset, processor.filter, **filter_conf)
 
@@ -151,6 +155,7 @@ def Dataset(data_list_file, conf,
         dataset = Processor(dataset, processor.add_noise,
                             noise_data, conf['noise_prob'])
     feature_extraction_conf = conf.get('feature_extraction_conf', {})
+    print(feature_extraction_conf)
     if feature_extraction_conf['feature_type'] == 'mfcc':
         dataset = Processor(dataset, processor.compute_mfcc,
                             **feature_extraction_conf)
@@ -174,6 +179,9 @@ def Dataset(data_list_file, conf,
 
 if __name__ == '__main__':
     import sys
-    dataset = Dataset(sys.argv[1], {})
+    from wekws.utils.file_utils import read_symbol_table
+    symbol_table = read_symbol_table('/home/mlxu/github/wekws/wekws/dataset/symbol_table.dict')
+    dataset = Dataset(sys.argv[1], symbol_table, {})
     for data in dataset:
         print(data)
+        break
